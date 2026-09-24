@@ -1,0 +1,12 @@
+# Local Windows development configuration
+ftp_bind=127.0.0.1
+ftp_advertise=127.0.0.1
+ftp_port=2121
+# Windows configuration for Keyence SR-750 at 192.168.210.200
+ftp_bind=0.0.0.0
+ftp_advertise=192.168.210.1
+ftp_port=21
+ftp_user=update
+ftp_password=update
+parent_socket=127.0.0.1:9100
+tmp_dir=C:\\tiskarna\\tmp

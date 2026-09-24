@@ -9,11 +9,11 @@ use std::str::FromStr;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub ftp_bind: String,
+    pub ftp_advertise: String,
     pub ftp_port: u16,
     pub ftp_user: String,
     pub ftp_password: String,
-    pub tcp_bind: String,
-    pub tcp_port: u16,
+    // Unix socket path on Unix; TCP address such as 127.0.0.1:9100 on Windows.
     pub parent_socket: PathBuf,
     pub tmp_dir: PathBuf,
 }
@@ -30,8 +30,13 @@ impl fmt::Display for ConfigError {
 impl Error for ConfigError {}
 
 impl Config {
+    /// Loads the simple key=value configuration format used by the collector.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(path).map_err(|error| {
+            ConfigError(format!(
+                "nelze načíst konfigurační soubor '{path}': {error}"
+            ))
+        })?;
         let mut values = HashMap::new();
         for (line_number, line) in contents.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -46,11 +51,11 @@ impl Config {
 
         Ok(Self {
             ftp_bind: required(&values, "ftp_bind")?,
+            ftp_advertise: optional(&values, "ftp_advertise")
+                .unwrap_or_else(|| required(&values, "ftp_bind").unwrap()),
             ftp_port: parse(&values, "ftp_port")?,
             ftp_user: required(&values, "ftp_user")?,
             ftp_password: required(&values, "ftp_password")?,
-            tcp_bind: required(&values, "tcp_bind")?,
-            tcp_port: parse(&values, "tcp_port")?,
             parent_socket: PathBuf::from(required(&values, "parent_socket")?),
             tmp_dir: PathBuf::from(required(&values, "tmp_dir")?),
         })
@@ -59,8 +64,8 @@ impl Config {
     pub fn validate(&self) -> Result<(), Box<dyn Error>> {
         IpAddr::from_str(&self.ftp_bind)
             .map_err(|_| ConfigError("ftp_bind musí být IP adresa".to_string()))?;
-        IpAddr::from_str(&self.tcp_bind)
-            .map_err(|_| ConfigError("tcp_bind musí být IP adresa".to_string()))?;
+        IpAddr::from_str(&self.ftp_advertise)
+            .map_err(|_| ConfigError("ftp_advertise musí být IP adresa".to_string()))?;
         if self.ftp_user.is_empty() || self.ftp_password.is_empty() {
             return Err(
                 ConfigError("ftp_user a ftp_password nesmí být prázdné".to_string()).into(),
@@ -88,6 +93,10 @@ fn required(values: &HashMap<String, String>, key: &str) -> Result<String, Box<d
         .filter(|value| !value.is_empty())
         .cloned()
         .ok_or_else(|| ConfigError(format!("chybí konfigurace {key}")).into())
+}
+
+fn optional(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    values.get(key).filter(|value| !value.is_empty()).cloned()
 }
 
 fn parse<T: FromStr>(values: &HashMap<String, String>, key: &str) -> Result<T, Box<dyn Error>>

@@ -1,8 +1,8 @@
 use crate::config::Config;
 use std::error::Error;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::net::TcpListener;
+#[cfg(unix)]
+use std::fs;
+use std::io::Write;
 #[cfg(windows)]
 use std::net::{Shutdown, TcpStream};
 #[cfg(unix)]
@@ -10,54 +10,28 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::Receiver;
 
 pub enum Input {
-    Bmp(Vec<u8>),
-    Tcp(Vec<u8>),
-}
-
-pub fn run_tcp_listener(
-    config: Config,
-    sender: std::sync::mpsc::Sender<Input>,
-) -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind((config.tcp_bind.as_str(), config.tcp_port))?;
-    for stream in listener.incoming() {
-        let mut stream = stream?;
-        let mut data = Vec::new();
-        stream.read_to_end(&mut data)?;
-        if !data.is_empty() {
-            sender.send(Input::Tcp(data))?;
-        }
-    }
-    Ok(())
+    /// BMP data received through FTP.
+    Bmp { data: Vec<u8>, name: String },
 }
 
 #[cfg(unix)]
 pub fn run_pipeline(config: Config, receiver: Receiver<Input>) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(&config.tmp_dir)?;
     if config.parent_socket.exists() {
         fs::remove_file(&config.parent_socket)?;
     }
     let parent_listener = UnixListener::bind(&config.parent_socket)?;
-    let bmp_path = config.tmp_dir.join("incoming.bmp");
-    let tcp_path = config.tmp_dir.join("incoming.tcp");
-    let mut bmp = None;
-    let mut tcp = None;
 
     for input in receiver {
         match input {
-            Input::Bmp(data) => {
+            Input::Bmp { data, name } => {
                 validate_bmp(&data)?;
-                write_tmp(&bmp_path, &data)?;
-                bmp = Some(data);
+                println!("FTP vstup: přijat BMP {name} ({} B)", data.len());
+                send_to_parent(&parent_listener, &data, &name)?;
+                println!(
+                    "Pipeline: předáno parent procesu (BMP {} B, název {name})",
+                    data.len()
+                );
             }
-            Input::Tcp(data) => {
-                write_tmp(&tcp_path, &data)?;
-                tcp = Some(data);
-            }
-        }
-        if let (Some(bmp_data), Some(tcp_data)) = (bmp.take(), tcp.take()) {
-            send_to_parent(&parent_listener, &bmp_data, &tcp_data)?;
-            let _ = fs::remove_file(&bmp_path);
-            let _ = fs::remove_file(&tcp_path);
         }
     }
     Ok(())
@@ -65,41 +39,24 @@ pub fn run_pipeline(config: Config, receiver: Receiver<Input>) -> Result<(), Box
 
 #[cfg(not(unix))]
 pub fn run_pipeline(config: Config, receiver: Receiver<Input>) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(&config.tmp_dir)?;
     let parent_address = config
         .parent_socket
         .to_str()
         .ok_or("neplatná parent_socket adresa")?;
-    let bmp_path = config.tmp_dir.join("incoming.bmp");
-    let tcp_path = config.tmp_dir.join("incoming.tcp");
-    let mut bmp = None;
-    let mut tcp = None;
 
     for input in receiver {
         match input {
-            Input::Bmp(data) => {
+            Input::Bmp { data, name } => {
                 validate_bmp(&data)?;
-                write_tmp(&bmp_path, &data)?;
-                bmp = Some(data);
+                println!("FTP vstup: přijat BMP {name} ({} B)", data.len());
+                send_to_parent(parent_address, &data, &name)?;
+                println!(
+                    "Pipeline: předáno parent procesu (BMP {} B, název {name})",
+                    data.len()
+                );
             }
-            Input::Tcp(data) => {
-                write_tmp(&tcp_path, &data)?;
-                tcp = Some(data);
-            }
-        }
-        if let (Some(bmp_data), Some(tcp_data)) = (bmp.take(), tcp.take()) {
-            send_to_parent(parent_address, &bmp_data, &tcp_data)?;
-            let _ = fs::remove_file(&bmp_path);
-            let _ = fs::remove_file(&tcp_path);
         }
     }
-    Ok(())
-}
-
-fn write_tmp(path: &std::path::Path, data: &[u8]) -> Result<(), Box<dyn Error>> {
-    let mut file = File::create(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
     Ok(())
 }
 
@@ -110,20 +67,21 @@ fn validate_bmp(data: &[u8]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// Each payload is prefixed with an unsigned 64-bit big-endian length.
 #[cfg(unix)]
-fn send_to_parent(listener: &UnixListener, bmp: &[u8], tcp: &[u8]) -> Result<(), Box<dyn Error>> {
+fn send_to_parent(listener: &UnixListener, bmp: &[u8], name: &str) -> Result<(), Box<dyn Error>> {
     let (mut socket, _) = listener.accept()?;
     write_frame(&mut socket, bmp)?;
-    write_frame(&mut socket, tcp)?;
+    write_frame(&mut socket, name.as_bytes())?;
     socket.shutdown(std::net::Shutdown::Write)?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn send_to_parent(address: &str, bmp: &[u8], tcp: &[u8]) -> Result<(), Box<dyn Error>> {
+fn send_to_parent(address: &str, bmp: &[u8], name: &str) -> Result<(), Box<dyn Error>> {
     let mut socket = TcpStream::connect(address)?;
     write_tcp_frame(&mut socket, bmp)?;
-    write_tcp_frame(&mut socket, tcp)?;
+    write_tcp_frame(&mut socket, name.as_bytes())?;
     socket.shutdown(Shutdown::Write)?;
     Ok(())
 }
